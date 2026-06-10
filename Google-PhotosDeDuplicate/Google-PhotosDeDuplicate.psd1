@@ -1,5 +1,5 @@
 @{
-    RootModule = 'Google-PhotosDeDuplicate.psm1'
+    RootModule = 'GooglePhotosDeDuplicate.Core.psm1'
     ModuleVersion = '0.1.0'
     GUID = '5a32731a-0c5d-48de-85a3-9e7ac5c3147a'
     Author = 'Donovoi'
