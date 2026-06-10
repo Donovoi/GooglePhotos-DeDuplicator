@@ -4,30 +4,26 @@ A local-first PowerShell module for scanning, reviewing, and cautiously de-dupli
 
 > First target: Chrome on Windows with PowerShell 7.2+. Other browsers can come later.
 
-## Why this exists
+## Current status
 
-The Google Photos Library API is no longer a good fit for whole-library duplicate detection. After the 2025 API changes, listing/searching/retrieving media through the Library API is restricted to app-created content, so this module uses the signed-in browser UI instead.
+This is an early working scaffold. It is designed to be safe by default, observable, and testable before it touches your Google Photos trash.
 
-## What it does
+## Why browser automation?
 
-- Opens or attaches to Chrome with a dedicated profile.
-- Scrolls the Google Photos timeline.
-- Captures visible lazy-loaded tiles.
-- Hashes thumbnails in the browser when possible.
-- Stores scan results in an append-only JSONL database.
-- Groups likely duplicate photos/videos.
-- Exports a colourful review report.
-- Moves a uniquely identified item to Google Photos Trash through the browser UI.
-- Refuses ambiguous deletion unless you explicitly force it.
-- Provides a built-in “detractor review” safety check.
+The Google Photos Library API is no longer a reliable whole-library scanning path for existing libraries, so this module uses your signed-in Chrome session and the Google Photos web UI. It does not ask for your Google password and does not store OAuth tokens.
 
-## What it does **not** do yet
+## Features
 
-- It does not permanently delete anything.
-- It does not use the restricted Google Photos Library API for full-library access.
-- It does not silently delete duplicate groups.
-- It does not yet support Edge/Firefox/Safari.
-- It does not guarantee Google Photos UI selectors will remain stable forever.
+- Opens or attaches to Chrome with `--remote-debugging-port`.
+- Uses a dedicated Chrome profile by default.
+- Scrolls the Google Photos timeline and captures lazy-loaded visible tiles.
+- Hashes visible thumbnails in-browser when canvas access is allowed.
+- Stores results in an append-only JSONL scan store.
+- Uses parallel PowerShell processing when normalising scan records.
+- Groups likely duplicate photos/videos using thumbnail URL and visual hash buckets.
+- Exports a vibrant HTML review report.
+- Provides a strict `Remove-GPDMediaItem` cmdlet that only deletes when identifiers resolve to exactly one item unless `-Force` is used.
+- Includes Pester tests, GitHub Actions validation, and an internal detractor review cmdlet.
 
 ## Install from source
 
@@ -36,23 +32,27 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 Import-Module ./Google-PhotosDeDuplicate/Google-PhotosDeDuplicate.psd1 -Force
 ```
 
-Run the environment check:
+Validate your machine:
 
 ```powershell
 Test-GPDEnvironment
 ```
 
-## First run
-
-Open Chrome with a dedicated profile:
+## Connect to Chrome
 
 ```powershell
 Connect-GPDBrowser -Verbose
 ```
 
-Sign in to Google Photos in that Chrome window. The module reuses the profile on later runs.
+The first run opens Chrome with a profile under:
 
-## Scan your Google Photos timeline
+```text
+%LOCALAPPDATA%\GooglePhotosDeDuplicate\ChromeProfile
+```
+
+Sign in to Google Photos in that Chrome window. Later runs reuse the profile.
+
+## Scan the timeline
 
 ```powershell
 Start-GPDLibraryScan `
@@ -65,7 +65,7 @@ Start-GPDLibraryScan `
   -Verbose
 ```
 
-For 70,000+ items, expect to run in batches. The JSONL database is append-only and the scanner de-duplicates records by local fingerprint.
+For 70,000+ items, run in batches. The JSONL store is append-only and avoids duplicate `LocalId` values within the active scan run.
 
 ## Find duplicate groups
 
@@ -77,13 +77,13 @@ Get-GPDDuplicateGroup `
 
 Similarity modes:
 
-| Mode | Meaning |
+| Mode | Behaviour |
 | --- | --- |
-| `ExactVisualHash` | Same 64-bit thumbnail visual hash only. |
-| `Conservative` | Same date/kind/aspect bucket and visual hash distance <= 4. |
-| `Relaxed` | Same date/kind/aspect bucket and visual hash distance <= 8. |
+| `ExactVisualHash` | Same 64-bit visual hash. |
+| `Conservative` | Same kind/date/aspect bucket and Hamming distance <= 4. |
+| `Relaxed` | Same kind/date/aspect bucket and Hamming distance <= 8. |
 
-## Export a review report
+## Export the review report
 
 ```powershell
 Export-GPDReport `
@@ -93,11 +93,9 @@ Export-GPDReport `
   -Open
 ```
 
-The report shows candidate groups, a proposed keeper, local IDs, hashes, and open links.
+The report shows duplicate groups, proposed keepers, local IDs, hashes, dimensions, and Google Photos links when discovered.
 
-## Delete exactly one identified item
-
-`Remove-GPDMediaItem` is intentionally strict. It refuses to continue if your identifiers match zero or multiple records.
+## Delete a uniquely identified item
 
 Preview first:
 
@@ -108,7 +106,7 @@ Remove-GPDMediaItem `
   -WhatIf
 ```
 
-Then move to Trash:
+Move the item to Google Photos Trash:
 
 ```powershell
 Remove-GPDMediaItem `
@@ -129,9 +127,9 @@ Remove-GPDMediaItem `
   -Confirm
 ```
 
-That composite delete only proceeds if the store resolves it to exactly one media item.
+That composite delete only proceeds when it resolves to exactly one known media item.
 
-## One command workflow
+## One-command workflow
 
 ```powershell
 Invoke-GPDDeduplication `
@@ -145,72 +143,74 @@ Invoke-GPDDeduplication `
   -OpenReport
 ```
 
-## Validate the module
+This command does **not** delete anything.
+
+## Validate and verify
 
 ```powershell
-Install-PSResource Pester -Scope CurrentUser -TrustRepository -Reinstall
-Install-PSResource PSScriptAnalyzer -Scope CurrentUser -TrustRepository -Reinstall
+Install-Module Pester -Scope CurrentUser -Force -SkipPublisherCheck
+Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -SkipPublisherCheck
 ./tools/Test-GPDModule.ps1
 ```
 
-This runs:
+That script runs:
 
 1. PSScriptAnalyzer.
 2. Pester tests.
-3. Built-in detractor review.
+3. `Invoke-GPDDetractorReview`.
 
-You can run only the built-in detractor pass with:
+Run only the detractor pass:
 
 ```powershell
 Invoke-GPDDetractorReview
 ```
 
-## Safety model
+## Safety rules
 
-Deletion is intentionally hard to trigger:
+- Deletion supports `-WhatIf` and `-Confirm`.
+- Ambiguous identifiers are refused by default.
+- Browser deletion requires a discovered `ItemUrl`.
+- The module moves items to Trash; it does not permanently delete.
+- Every delete attempt appends an audit row to the JSONL store.
 
-- `Remove-GPDMediaItem` supports `-WhatIf` and `-Confirm`.
-- It refuses ambiguous matches.
-- It opens the target item in Chrome before deletion.
-- It checks that the open page still looks like the expected media kind.
-- It records the deletion result in the JSONL store.
-- Google Photos Trash remains the recovery layer; the module does not permanently delete.
+## Large-library guidance
 
-## Large library tips
-
-For 70,000+ items:
+Recommended first serious run:
 
 ```powershell
+Connect-GPDBrowser
 Start-GPDLibraryScan `
   -DatabasePath ./scan-output/google-photos.jsonl `
+  -FromTop `
   -MaxScrolls 10000 `
   -ThrottleMs 1500 `
   -HashConcurrency 16 `
   -StopWhenNoNewItems `
   -Verbose
+Export-GPDReport `
+  -DatabasePath ./scan-output/google-photos.jsonl `
+  -Path ./reports/review.html `
+  -Open
 ```
 
-Recommended approach:
+Then delete only reviewed `LocalId` values.
 
-1. Scan in batches.
-2. Export report.
-3. Review proposed keepers.
-4. Delete only specific reviewed `LocalId` values.
-5. Re-run duplicate grouping.
+## Limitations
 
-## Notes on browser automation
-
-The module talks to Chrome through `127.0.0.1:<port>` and CDP websockets. It does not ask for your Google password and does not store OAuth tokens.
+- Google Photos UI selectors can change.
+- Some thumbnails may not be hashable because browser canvas access can be blocked by cross-origin image protections.
+- Video matching is thumbnail-based in this first cut; preview-frame hashing is on the roadmap.
+- JSONL is simple and robust, but SQLite will be better for very heavy indexing later.
 
 ## Roadmap
 
-- SQLite storage backend for heavier indexing.
-- Video preview-frame hashing.
-- Better item deep-link extraction.
+- SQLite backend.
+- Video frame sampling.
+- Stronger deep-link extraction.
 - Batch review queue.
-- Pause/resume scan cursor.
+- Resume cursor/checkpoint UX.
 - Edge support.
-- Optional rclone-assisted export comparison.
+- Optional rclone-assisted comparison against local exports.
 
 ## License
 
